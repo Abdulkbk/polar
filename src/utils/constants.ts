@@ -69,7 +69,10 @@ export const BasePorts: Record<NodeImplementation, Record<string, number>> = {
     rest: 8281,
     p2p: 9935,
   },
-  btcd: {},
+  btcd: {
+    rpc: 18444,
+    p2p: 18334,
+  },
   tapd: {
     grpc: 12029,
     rest: 8289,
@@ -225,13 +228,20 @@ export const dockerConfigs: Record<NodeImplementation, DockerConfig> = {
     variables: ['rpcUser', 'rpcAuth'],
   },
   btcd: {
-    name: 'btcd',
-    imageName: '',
-    logo: '',
+    name: 'BTCD',
+    imageName: 'polarlightning/btcd',
+    logo: '', //TODO: add logo
     platforms: ['mac', 'linux', 'windows'],
     volumeDirName: 'btcd',
-    command: '',
-    variables: [],
+    command: [
+      'btcd',
+      '--regtest',
+      '--rpcuser={{rpcUser}}',
+      '--rpcpass={{rpcPass}}',
+      '--txindex',
+      '--nodnsseed',
+    ].join('\n '),
+    variables: ['rpcUser', 'rpcPass'],
   },
   tapd: {
     name: 'Taproot Assets',
@@ -385,8 +395,8 @@ export const defaultRepoState: DockerRepoState = {
       versions: ['29.0', '28.0', '27.0', '26.0'],
     },
     btcd: {
-      latest: '',
-      versions: [],
+      latest: '0.24.2',
+      versions: ['0.24.2'],
     },
     tapd: {
       latest: '0.6.0-alpha',
