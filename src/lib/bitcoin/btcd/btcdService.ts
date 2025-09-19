@@ -13,7 +13,9 @@ import { delay, waitFor } from 'utils/async';
 
 // ts-ignore
 class BtcdService implements BitcoinService {
-  async createDefaultWallet() {}
+  async createDefaultWallet() {
+    return '' as any;
+  }
 
   async getBlockchainInfo(node: BitcoinNode) {
     const body = {
@@ -21,7 +23,12 @@ class BtcdService implements BitcoinService {
       method: 'getblockchaininfo',
       params: [],
     };
+    logger.debug(`Getting blockchain info for btcd node ${node.name}`);
     const { result } = await httpPost<BTCD.GetBlockchainInfoResponse>(node, body);
+    logger.debug(
+      `BtcdService.getBlockchainInfo SUCCESS for ${node.name}:`,
+      JSON.stringify(result, null, 2),
+    );
     return {
       chain: result.chain,
       blocks: result.blocks,
@@ -129,8 +136,8 @@ class BtcdService implements BitcoinService {
    */
   async waitUntilOnline(
     node: BitcoinNode,
-    interval = 3 * 1000, // check every 3 seconds
-    timeout = 120 * 1000, // timeout after 120 seconds
+    interval = 10 * 1000, // check every 10 seconds
+    timeout = 5 * 60 * 1000, // timeout after 5 minutes
   ): Promise<void> {
     return waitFor(
       async () => {
