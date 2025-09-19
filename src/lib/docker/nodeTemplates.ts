@@ -195,7 +195,9 @@ export const btcd = (
   hostname: name,
   command: trimInside(command),
   restart: 'always',
-  volumes: [`./volumes/${dockerConfigs.btcd.volumeDirName}/${name}:/home/btcd/.btcd`],
+  volumes: [
+    `./volumes/${dockerConfigs.btcd.volumeDirName}/${name}/btcd:/home/btcd/.btcd`,
+  ],
   expose: [
     '18334', // RPC
     '18444', // p2p
@@ -212,13 +214,17 @@ export const btcwallet = (
   image: string,
   rpcPort: number,
   command: string,
+  btcdName: string,
 ): ComposeService => ({
   image,
   container_name: container,
   hostname: name,
   command: trimInside(command),
   restart: 'always',
-  volumes: [`./volumes/btcwallet/${name}:/home/btcwallet/.btcwallet`],
+  volumes: [
+    `./volumes/btcwallet/${name}/btcwallet:/home/btcwallet/.btcwallet`,
+    `./volumes/btcd/${btcdName}/btcd:/home/btcwallet/.btcd`,
+  ],
   expose: [
     '18332', // RPC
   ],

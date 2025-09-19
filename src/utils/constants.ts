@@ -248,6 +248,7 @@ export const dockerConfigs: Record<NodeImplementation, DockerConfig> = {
       '--rpcpass={{rpcPass}}',
       '--txindex',
       '--nodnsseed',
+      '--rpclisten=0.0.0.0:18334',
     ].join('\n '),
     variables: ['rpcUser', 'rpcPass'],
   },

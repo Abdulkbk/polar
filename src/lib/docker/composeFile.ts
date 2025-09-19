@@ -238,17 +238,25 @@ class ComposeFile {
     const variables = {
       rpcUser: bitcoinCredentials.user,
       rpcPass: bitcoinCredentials.pass,
-      backendName: getContainerName(backend),
+      nodeName: backend.name,
     };
 
     // use the node's image
     const image = `polarlightning/btcwallet:0.16.13`;
     // use the node's command
-    const nodeCommand = `btcwallet --regtest --username={{rpcUser}} --password={{rpcPass}} --rpclisten=0.0.0.0:18332 --rpcconnect={{backendName}}`;
+    const nodeCommand = [
+      'btcwallet',
+      '--regtest',
+      '--username={{rpcUser}}',
+      '--password={{rpcPass}}',
+      '--rpclisten=0.0.0.0:18332',
+      '--rpcconnect={{nodeName}}',
+      '--cafile=/home/btcwallet/.btcd/rpc.cert',
+    ].join('\n ');
     // replace the variables in the command
     const command = this.mergeCommand(nodeCommand, variables);
     // add the docker service
-    const svc = btcwallet(name, container, image, rpcPort, command);
+    const svc = btcwallet(name, container, image, rpcPort, command, backend.name);
     this.addService(svc);
   }
 
