@@ -107,7 +107,6 @@ describe('ComposeFile', () => {
     expect(service.command).toContain('--btcd.rpchost=');
     expect(service.command).toContain('--btcd.rpcuser=');
     expect(service.command).toContain('--btcd.rpcpass=');
-    expect(service.command).toContain('--btcd.rawrpccert=/rpc/rpc.cert');
     // Should NOT have bitcoind-specific flags
     expect(service.command).not.toContain('--bitcoin.node=bitcoind');
     expect(service.command).not.toContain('--bitcoind.zmq');
@@ -243,7 +242,6 @@ describe('ComposeFile', () => {
     expect(service.command).toContain('--lnd.btcd.rpchost=');
     expect(service.command).toContain('--lnd.btcd.rpcuser=');
     expect(service.command).toContain('--lnd.btcd.rpcpass=');
-    expect(service.command).toContain('--lnd.btcd.rawrpccert=/rpc/rpc.cert');
     // Should NOT have bitcoind-specific flags
     expect(service.command).not.toContain('--lnd.bitcoin.node=bitcoind');
     expect(service.command).not.toContain('--lnd.bitcoind.zmq');

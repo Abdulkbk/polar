@@ -827,7 +827,7 @@ export const getDefaultCommand = (
   }
 
   // If backend is btcd for litd, remove bitcoind specific flags and add btcd flags
-  if (implementation === 'LND' && backend === 'btcd') {
+  if (implementation === 'litd' && backend === 'btcd') {
     command = command
       .replace('--lnd.bitcoin.node=bitcoind', '--lnd.bitcoin.node=btcd')
       .replace('--lnd.bitcoind.rpchost={{backendName}}', '')
@@ -838,7 +838,7 @@ export const getDefaultCommand = (
 
     // Add btcd specific flags
     command +=
-      ' --lnd.btcd.rpcuser={{rpcUser}} --lnd.btcd.rpcpass={{rpcPass}} --lnd.btcd.rpchost={{backendName}} --lnd.btcd.dir=/home/lnd/.btcd';
+      ' --lnd.btcd.rpcuser={{rpcUser}} --lnd.btcd.rpcpass={{rpcPass}} --lnd.btcd.rpchost={{backendName}} --lnd.btcd.dir=/home/litd/.btcd';
   }
 
   return command;
