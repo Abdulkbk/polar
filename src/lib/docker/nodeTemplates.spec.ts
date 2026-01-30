@@ -39,7 +39,7 @@ describe('nodeTemplates', () => {
     expect(node.image).toContain('lnd');
     expect(node.volumes).toHaveLength(2);
     expect(node.volumes[1]).toContain('btcd/btcd1');
-    expect(node.volumes[1]).toContain('/rpc:ro');
+    expect(node.volumes[1]).toContain('/.btcd');
   });
 
   it('should create a valid litd config', () => {
@@ -74,6 +74,6 @@ describe('nodeTemplates', () => {
     expect(node.image).toContain('litd');
     expect(node.volumes).toHaveLength(4);
     expect(node.volumes[3]).toContain('btcd/btcd1');
-    expect(node.volumes[3]).toContain('/rpc:ro');
+    expect(node.volumes[3]).toContain('/.btcd');
   });
 });
