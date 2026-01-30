@@ -175,11 +175,17 @@ export const filterCompatibleBackends = (
   compatibility: DockerRepoImage['compatibility'],
   backends: BitcoinNode[],
 ): BitcoinNode[] => {
+  // Only LND and litd supports btcd backend - filter out btcd for other implementations
+  const supportsBtcd = implementation === 'LND' || implementation === 'litd';
+  const filteredBackends = supportsBtcd
+    ? backends
+    : backends.filter(n => n.implementation !== 'btcd');
+
   // if compatibility is not defined, then allow all backend versions
-  if (!compatibility || !compatibility[version]) return backends;
+  if (!compatibility || !compatibility[version]) return filteredBackends;
   const requiredVersion = compatibility[version];
-  const compatibleBackends = backends.filter(n =>
-    isVersionCompatible(n.version, requiredVersion),
+  const compatibleBackends = filteredBackends.filter(
+    n => isVersionCompatible(n.version, requiredVersion) || n.implementation === 'btcd',
   );
   if (compatibleBackends.length === 0) {
     throw new Error(
@@ -789,6 +795,7 @@ export const getMissingImages = (network: Network, pulled: string[]): string[] =
 export const getDefaultCommand = (
   implementation: NodeImplementation,
   version: string,
+  backend?: NodeImplementation,
 ) => {
   let command = dockerConfigs[implementation].command;
 
@@ -802,6 +809,36 @@ export const getDefaultCommand = (
   // Remove the `grpc-host` flag that is not supported in older CLN versions.
   if (implementation === 'c-lightning' && isVersionBelow(version, '24.11')) {
     command = command.replace('--grpc-host=0.0.0.0', '');
+  }
+
+  // If backend is btcd for lnd, remove bitcoind specific flags and add btcd flags
+  if (implementation === 'LND' && backend === 'btcd') {
+    command = command
+      .replace('--bitcoin.node=bitcoind', '--bitcoin.node=btcd')
+      .replace('--bitcoind.rpchost={{backendName}}', '')
+      .replace('--bitcoind.rpcuser={{rpcUser}}', '')
+      .replace('--bitcoind.rpcpass={{rpcPass}}', '')
+      .replace('--bitcoind.zmqpubrawblock=tcp://{{backendName}}:28334', '')
+      .replace('--bitcoind.zmqpubrawtx=tcp://{{backendName}}:28335', '');
+
+    // Add btcd specific flags
+    command +=
+      ' --btcd.rpcuser={{rpcUser}} --btcd.rpcpass={{rpcPass}} --btcd.rpchost={{backendName}} --btcd.dir=/home/lnd/.btcd';
+  }
+
+  // If backend is btcd for litd, remove bitcoind specific flags and add btcd flags
+  if (implementation === 'litd' && backend === 'btcd') {
+    command = command
+      .replace('--lnd.bitcoin.node=bitcoind', '--lnd.bitcoin.node=btcd')
+      .replace('--lnd.bitcoind.rpchost={{backendName}}', '')
+      .replace('--lnd.bitcoind.rpcuser={{rpcUser}}', '')
+      .replace('--lnd.bitcoind.rpcpass={{rpcPass}}', '')
+      .replace('--lnd.bitcoind.zmqpubrawblock=tcp://{{backendName}}:28334', '')
+      .replace('--lnd.bitcoind.zmqpubrawtx=tcp://{{backendName}}:28335', '');
+
+    // Add btcd specific flags
+    command +=
+      ' --lnd.btcd.rpcuser={{rpcUser}} --lnd.btcd.rpcpass={{rpcPass}} --lnd.btcd.rpchost={{backendName}} --lnd.btcd.dir=/home/litd/.btcd';
   }
 
   return command;
