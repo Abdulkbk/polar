@@ -20,6 +20,7 @@ import {
   createLndNetworkNode,
   createNetwork,
   createTapdNetworkNode,
+  filterCompatibleBackends,
   getCLightningFilePaths,
   getImageCommand,
   getInvoicePayload,
