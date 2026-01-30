@@ -110,7 +110,9 @@ class ComposeFile {
     // use the node's custom image or the default for the implementation
     const image = node.docker.image || `${dockerConfigs.LND.imageName}:${version}`;
     // use the node's custom command or the default for the implementation
-    const nodeCommand = node.docker.command || getDefaultCommand('LND', version);
+    const nodeCommand =
+      node.docker.command ||
+      getDefaultCommand('LND', version, isBtcdBackend ? 'btcd' : undefined);
     // replace the variables in the command
     const command = this.mergeCommand(nodeCommand, variables);
     // add the docker service
@@ -200,7 +202,9 @@ class ComposeFile {
     // use the node's custom image or the default for the implementation
     const image = node.docker.image || `${dockerConfigs.litd.imageName}:${version}`;
     // use the node's custom command or the default for the implementation
-    const nodeCommand = node.docker.command || getDefaultCommand('litd', version);
+    const nodeCommand =
+      node.docker.command ||
+      getDefaultCommand('litd', version, isBtcdBackend ? 'btcd' : undefined);
     // replace the variables in the command
     const command = this.mergeCommand(nodeCommand, variables);
     // add the docker service
