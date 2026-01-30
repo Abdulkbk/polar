@@ -128,9 +128,9 @@ describe('MCP model > createNetwork', () => {
     await expect(
       store.getActions().mcp.createNetwork({
         name: 'unsupported-impl',
-        nodes: [{ implementation: 'btcd' as any }],
+        nodes: [{ implementation: 'invalid-impl' as any }],
       }),
-    ).rejects.toThrow('Unsupported implementation "btcd"');
+    ).rejects.toThrow('Unsupported implementation "invalid-impl"');
   });
 
   it('should reject implementations missing from the repo state', async () => {
@@ -157,7 +157,7 @@ describe('MCP model > createNetwork', () => {
     ).rejects.toThrow('Version "9.9.9" is not supported for LND');
   });
 
-  it('should throw when lightning nodes are requested without a bitcoind backend', async () => {
+  it('should throw when lightning nodes are requested without a bitcoin backend', async () => {
     await expect(
       store.getActions().mcp.createNetwork({
         name: 'invalid',
@@ -684,5 +684,82 @@ describe('MCP model > createNetwork', () => {
       true,
     );
     expect(result.network.nodes.tap).toHaveLength(1);
+  });
+
+  // btcd support tests
+  it('should create a network with btcd nodes', async () => {
+    const result = await store.getActions().mcp.createNetwork({
+      name: 'btcd-network',
+      nodes: [{ implementation: 'btcd', count: 2 }],
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.network.nodes.bitcoin).toHaveLength(2);
+    expect(result.network.nodes.bitcoin.every(n => n.implementation === 'btcd')).toBe(
+      true,
+    );
+  });
+
+  it('should create a mixed network with bitcoind, btcd, LND, and c-lightning', async () => {
+    // Mixed network: bitcoind for CLN, btcd also available for LND
+    const result = await store.getActions().mcp.createNetwork({
+      name: 'mixed-bitcoin-backends',
+      nodes: [
+        { implementation: 'bitcoind' },
+        { implementation: 'btcd' },
+        { implementation: 'LND' },
+        { implementation: 'c-lightning' },
+      ],
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.network.nodes.bitcoin).toHaveLength(2);
+    expect(result.network.nodes.bitcoin.some(n => n.implementation === 'bitcoind')).toBe(
+      true,
+    );
+    expect(result.network.nodes.bitcoin.some(n => n.implementation === 'btcd')).toBe(
+      true,
+    );
+    expect(result.network.nodes.lightning.some(n => n.implementation === 'LND')).toBe(
+      true,
+    );
+    expect(
+      result.network.nodes.lightning.some(n => n.implementation === 'c-lightning'),
+    ).toBe(true);
+  });
+
+  it('should add btcd with non-latest version via additionalNodes', async () => {
+    const result = await store.getActions().mcp.createNetwork({
+      name: 'btcd-pinned-version',
+      nodes: [{ implementation: 'btcd', version: '0.24.2' }],
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.network.nodes.bitcoin).toHaveLength(1);
+    expect(result.network.nodes.bitcoin[0].implementation).toBe('btcd');
+    expect(result.network.nodes.bitcoin[0].version).toBe('0.24.2');
+  });
+
+  it('should track btcd versions in btcdVersions set', async () => {
+    const result = await store.getActions().mcp.createNetwork({
+      name: 'btcd-versions-tracking',
+      nodes: [
+        { implementation: 'btcd', version: '0.25.0' },
+        { implementation: 'btcd', version: '0.24.2' },
+      ],
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.network.nodes.bitcoin).toHaveLength(2);
+    expect(
+      result.network.nodes.bitcoin.some(
+        n => n.implementation === 'btcd' && n.version === '0.25.0',
+      ),
+    ).toBe(true);
+    expect(
+      result.network.nodes.bitcoin.some(
+        n => n.implementation === 'btcd' && n.version === '0.24.2',
+      ),
+    ).toBe(true);
   });
 });
