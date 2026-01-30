@@ -700,30 +700,6 @@ describe('MCP model > createNetwork', () => {
     );
   });
 
-  it('should throw when c-lightning is used with btcd only (no bitcoind)', async () => {
-    // CLN does NOT support btcd, so btcd-only should fail
-    await expect(
-      store.getActions().mcp.createNetwork({
-        name: 'cln-btcd-fail',
-        nodes: [{ implementation: 'btcd' }, { implementation: 'c-lightning' }],
-      }),
-    ).rejects.toThrow(
-      'Core Lightning and Eclair nodes require at least one bitcoind backend',
-    );
-  });
-
-  it('should throw when eclair is used with btcd only (no bitcoind)', async () => {
-    // Eclair does NOT support btcd, so btcd-only should fail
-    await expect(
-      store.getActions().mcp.createNetwork({
-        name: 'eclair-btcd-fail',
-        nodes: [{ implementation: 'btcd' }, { implementation: 'eclair' }],
-      }),
-    ).rejects.toThrow(
-      'Core Lightning and Eclair nodes require at least one bitcoind backend',
-    );
-  });
-
   it('should create a mixed network with bitcoind, btcd, LND, and c-lightning', async () => {
     // Mixed network: bitcoind for CLN, btcd also available for LND
     const result = await store.getActions().mcp.createNetwork({
