@@ -39,6 +39,7 @@ interface NetworkPlan {
     clightningNodes: number;
     eclairNodes: number;
     bitcoindNodes: number;
+    btcdNodes: number;
     tapdNodes: number;
     litdNodes: number;
   };
@@ -49,10 +50,12 @@ interface PlanContext {
   baseCounts: NetworkPlan['baseCounts'];
   additionalNodes: NormalizedNodeRequest[];
   bitcoindVersions: Set<string>;
+  btcdVersions: Set<string>;
 }
 
 const SUPPORTED_IMPLEMENTATIONS: NodeImplementation[] = [
   'bitcoind',
+  'btcd',
   'LND',
   'c-lightning',
   'eclair',
@@ -62,6 +65,7 @@ const SUPPORTED_IMPLEMENTATIONS: NodeImplementation[] = [
 
 const ADDITION_PRIORITY: readonly NodeImplementation[] = [
   'bitcoind',
+  'btcd',
   'LND',
   'c-lightning',
   'eclair',
@@ -179,17 +183,25 @@ const buildPlanContext = (
     clightningNodes: 0,
     eclairNodes: 0,
     bitcoindNodes: 0,
+    btcdNodes: 0,
     tapdNodes: 0,
     litdNodes: 0,
   };
 
   const additionalNodes: NormalizedNodeRequest[] = [];
   const bitcoindCandidates: NormalizedNodeRequest[] = [];
+  const btcdCandidates: NormalizedNodeRequest[] = [];
 
   normalized.forEach(node => {
     // Bitcoind is processed separately so we can align versions with LND compatibility
     if (node.implementation === 'bitcoind') {
       bitcoindCandidates.push(node);
+      return;
+    }
+
+    // btcd is also processed separately
+    if (node.implementation === 'btcd') {
+      btcdCandidates.push(node);
       return;
     }
 
@@ -241,6 +253,17 @@ const buildPlanContext = (
     additionalNodes.push(node);
   });
 
+  // btcd nodes using the latest version can be batched; the rest are deferred to addNode()
+  const latestBtcd = repoState.images.btcd?.latest;
+  btcdCandidates.forEach(node => {
+    if (latestBtcd && node.version === latestBtcd) {
+      baseCounts.btcdNodes += 1;
+      return;
+    }
+
+    additionalNodes.push(node);
+  });
+
   // Track every bitcoind version we will end up with; this drives later compatibility checks
   const bitcoindVersions = new Set<string>();
   if (baseCounts.bitcoindNodes > 0) {
@@ -250,6 +273,15 @@ const buildPlanContext = (
     .filter(node => node.implementation === 'bitcoind')
     .forEach(node => bitcoindVersions.add(node.version));
 
+  // Track every btcd version we will end up with
+  const btcdVersions = new Set<string>();
+  if (baseCounts.btcdNodes > 0 && latestBtcd) {
+    btcdVersions.add(latestBtcd);
+  }
+  additionalNodes
+    .filter(node => node.implementation === 'btcd')
+    .forEach(node => btcdVersions.add(node.version));
+
   // Queue nodes so that dependencies are added before consumers (bitcoin → LND → tapd)
   additionalNodes.sort(
     (a, b) =>
@@ -257,7 +289,7 @@ const buildPlanContext = (
       ADDITION_PRIORITY.indexOf(b.implementation),
   );
 
-  return { baseCounts, additionalNodes, bitcoindVersions };
+  return { baseCounts, additionalNodes, bitcoindVersions, btcdVersions };
 };
 
 const validateNetworkDependencies = ({
@@ -415,7 +447,7 @@ export const createNetworkDefinition: McpToolDefinition = {
           properties: {
             implementation: {
               type: 'string',
-              enum: ['bitcoind', 'LND', 'c-lightning', 'eclair', 'litd', 'tapd'],
+              enum: ['bitcoind', 'btcd', 'LND', 'c-lightning', 'eclair', 'litd', 'tapd'],
               description: 'Node implementation to add to the network',
             },
             version: {
@@ -463,6 +495,7 @@ export const createNetworkTool = thunk<
     clightningNodes: baseCounts.clightningNodes,
     eclairNodes: baseCounts.eclairNodes,
     bitcoindNodes: baseCounts.bitcoindNodes,
+    btcdNodes: baseCounts.btcdNodes,
     tapdNodes: baseCounts.tapdNodes,
     litdNodes: baseCounts.litdNodes,
     customNodes: {},
