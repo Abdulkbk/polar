@@ -135,7 +135,14 @@ class DockerService implements DockerLibrary {
     const file = new ComposeFile(network.id);
     const { bitcoin, lightning, tap } = network.nodes;
 
-    bitcoin.forEach(node => file.addBitcoind(node));
+    bitcoin.forEach(node => {
+      if (node.implementation === 'bitcoind') {
+        file.addBitcoind(node);
+      }
+      if (node.implementation === 'btcd') {
+        file.addBtcd(node);
+      }
+    });
     lightning.forEach(node => {
       if (node.implementation === 'LND') {
         const lnd = node as LndNode;
@@ -220,6 +227,26 @@ class DockerService implements DockerLibrary {
     info(` - path: ${network.path}`);
     const result = await this.execute(compose.upOne, node.name, this.getArgs(network));
     info(`Container started:\n ${result.out || result.err}`);
+
+    // btcd nodes have a companion btcwallet service that must also be started
+    if ((node as BitcoinNode).implementation === 'btcd') {
+      const walletName = `btcwallet-${node.name}`;
+      const walletDir = join(
+        network.path,
+        'volumes',
+        'btcwallet',
+        walletName,
+        'btcwallet',
+      );
+      await ensureDir(walletDir);
+      info(`Starting companion btcwallet container for ${node.name}`);
+      const walletResult = await this.execute(
+        compose.upOne,
+        walletName,
+        this.getArgs(network),
+      );
+      info(`btcwallet container started:\n ${walletResult.out || walletResult.err}`);
+    }
   }
 
   /**
@@ -232,6 +259,18 @@ class DockerService implements DockerLibrary {
     info(` - path: ${network.path}`);
     const result = await this.execute(compose.stopOne, node.name, this.getArgs(network));
     info(`Container stopped:\n ${result.out || result.err}`);
+
+    // btcd nodes have a companion btcwallet service that must also be stopped
+    if ((node as BitcoinNode).implementation === 'btcd') {
+      const walletName = `btcwallet-${node.name}`;
+      info(`Stopping companion btcwallet container for ${node.name}`);
+      const walletResult = await this.execute(
+        compose.stopOne,
+        walletName,
+        this.getArgs(network),
+      );
+      info(`btcwallet container stopped:\n ${walletResult.out || walletResult.err}`);
+    }
   }
 
   /**
@@ -250,6 +289,18 @@ class DockerService implements DockerLibrary {
     // IDockerComposeOptions as the first param and a spread for the remaining
     result = await this.execute(compose.rm as any, this.getArgs(network), node.name);
     info(`Removed:\n ${result.out || result.err}`);
+
+    // btcd nodes have a companion btcwallet service that must also be removed
+    if ((node as BitcoinNode).implementation === 'btcd') {
+      const walletName = `btcwallet-${node.name}`;
+      info(`Stopping companion btcwallet container for ${node.name}`);
+      result = await this.execute(compose.stopOne, walletName, this.getArgs(network));
+      info(`btcwallet container stopped:\n ${result.out || result.err}`);
+
+      info(`Removing btcwallet container`);
+      result = await this.execute(compose.rm as any, this.getArgs(network), walletName);
+      info(`btcwallet removed:\n ${result.out || result.err}`);
+    }
   }
 
   /**
