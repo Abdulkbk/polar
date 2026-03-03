@@ -1,0 +1,56 @@
+# btcd Dockerfile for Aurora
+# Builds btcd from a specified git repository and branch/commit
+
+FROM golang:1.24-alpine AS builder
+
+# Build arguments for customizing the source
+ARG checkout="master"
+ARG git_url="https://github.com/btcsuite/btcd"
+
+# Install build dependencies
+RUN apk add --no-cache --update alpine-sdk git make gcc
+
+# Clone and build btcd
+WORKDIR /go/src/github.com/btcsuite/btcd
+RUN git clone $git_url . \
+    && git checkout $checkout \
+    && go install -v . ./cmd/...
+
+# Build gosu for user-switching in the final image (gosu is a Go binary)
+RUN go install github.com/tianon/gosu@latest
+
+# Final image
+FROM alpine:latest AS final
+
+# Install runtime dependencies:
+#   shadow  - provides groupadd/useradd used in the entrypoint
+#   bash    - required by the entrypoint script
+#   curl    - general utility
+RUN apk --no-cache add bash curl shadow
+
+# Copy btcd binaries from builder
+COPY --from=builder /go/bin/btcd /usr/local/bin/
+COPY --from=builder /go/bin/btcctl /usr/local/bin/
+COPY --from=builder /go/bin/gencerts /usr/local/bin/
+COPY --from=builder /go/bin/addblock /usr/local/bin/
+COPY --from=builder /go/bin/findcheckpoint /usr/local/bin/
+
+# Copy gosu for privilege dropping in the entrypoint
+COPY --from=builder /go/bin/gosu /usr/local/bin/
+
+COPY docker-entrypoint.sh /entrypoint.sh
+
+RUN chmod +x /entrypoint.sh
+
+# Create btcd home directory so the entrypoint can chown it
+RUN mkdir -p /home/btcd
+
+VOLUME ["/home/btcd/.btcd"]
+
+# Expose ports (rpc, p2p)
+EXPOSE 18334 18444
+
+ENTRYPOINT ["/entrypoint.sh"]
+
+# Default command
+CMD ["btcd"]
