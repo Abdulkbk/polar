@@ -433,8 +433,8 @@ export const defaultRepoState: DockerRepoState = {
       versions: ['30.0', '29.0', '28.0', '27.0', '26.0'],
     },
     btcd: {
-      latest: '0.25.0',
-      versions: ['0.25.0', '0.24.2'],
+      latest: '0.25.1',
+      versions: ['0.25.1', '0.25.0', '0.24.2'],
     },
     tapd: {
       latest: '0.7.0-alpha',
