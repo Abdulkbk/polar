@@ -60,9 +60,7 @@ describe('PayInvoiceModal', () => {
     const cmp = <PayInvoiceModal network={network} />;
     const result = renderWithProviders(cmp, { initialState });
     unmount = result.unmount;
-    if (nodeName !== 'invalid') {
-      await result.findByLabelText('BOLT 11 Invoice');
-    }
+    await result.findByLabelText('BOLT 11 Invoice');
     return result;
   };
 
@@ -200,6 +198,75 @@ describe('PayInvoiceModal', () => {
       ).not.toBeInTheDocument();
     });
 
+    it('should recognize peer-opened liquidity after switching the selected node', async () => {
+      // Regression test: info must be fetched for every node, not just the one
+      // selected when the modal opened. Otherwise a newly selected node's pubkey is
+      // unknown and its peer-opened channels cannot be matched back to it.
+      lightningServiceMock.getInfo.mockImplementation(async n =>
+        defaultStateInfo({ pubkey: `${n.name}-pubkey` }),
+      );
+      lightningServiceMock.getChannels.mockImplementation(async n =>
+        n.name === 'bob'
+          ? [
+              defaultStateChannel({
+                uniqueId: 'channel-1',
+                pubkey: 'carol-pubkey', // bob opened this channel to carol
+                localBalance: '1000',
+                remoteBalance: '500',
+              }),
+            ]
+          : [],
+      );
+      // alice has no channels of her own and none opened to her by a peer
+      const { getByText, changeSelect } = await renderComponent('alice');
+      expect(getByText('Pay Invoice').closest('button')).toBeDisabled();
+
+      changeSelect('From Node', 'carol');
+      await waitFor(() => {
+        expect(getByText('Pay Invoice').closest('button')).not.toBeDisabled();
+      });
+    });
+
+    it('should treat a peer-opened channel with no remote balance as no liquidity', async () => {
+      lightningServiceMock.getInfo.mockImplementation(async n =>
+        defaultStateInfo({ pubkey: `${n.name}-pubkey` }),
+      );
+      lightningServiceMock.getChannels.mockImplementation(async n =>
+        n.name === 'bob'
+          ? [
+              defaultStateChannel({
+                uniqueId: 'channel-1',
+                pubkey: 'alice-pubkey', // bob opened this channel to alice
+                localBalance: '1000',
+                remoteBalance: '', // but alice holds nothing in it
+              }),
+            ]
+          : [],
+      );
+      const { findByText, getByText } = await renderComponent('alice');
+      expect(getByText('Pay Invoice').closest('button')).toBeDisabled();
+      expect(
+        await findByText(
+          'Node has no funds available to pay invoices. Fund the node or open a channel with outbound liquidity and try again.',
+        ),
+      ).toBeInTheDocument();
+    });
+
+    it('should still open when a node fails to return its info or channels', async () => {
+      // a stopped or unreachable node must not prevent the modal from opening
+      lightningServiceMock.getInfo.mockRejectedValue(new Error('info-failed'));
+      lightningServiceMock.getChannels.mockRejectedValue(new Error('channels-failed'));
+      const { getByText, queryByText } = await renderComponent('alice');
+      expect(getByText('From Node')).toBeInTheDocument();
+      // no channels were fetched, so no claim is made about the node's funds
+      expect(getByText('Pay Invoice').closest('button')).not.toBeDisabled();
+      expect(
+        queryByText(
+          'Node has no funds available to pay invoices. Fund the node or open a channel with outbound liquidity and try again.',
+        ),
+      ).not.toBeInTheDocument();
+    });
+
     it('should disable the pay button if the only channels with funds are pending, closed, or have invalid balance', async () => {
       lightningServiceMock.getBalances.mockResolvedValue({
         confirmed: '0',
@@ -278,6 +345,23 @@ describe('PayInvoiceModal', () => {
         amount: 1000,
         destination: 'asdf',
       });
+    });
+
+    it('should point to the asset dropdown when the node only holds assets', async () => {
+      // the asset channel has no sats balance, so a sats invoice cannot be paid.
+      // The node can still pay asset invoices, so the warning must say so rather
+      // than telling the user to fund the node.
+      const { findByText, queryByText } = await renderComponent('bob');
+      expect(
+        await findByText(
+          'Node has no Bitcoin (sats) available to pay invoices. Select a Taproot Asset to send, or open a channel with outbound liquidity and try again.',
+        ),
+      ).toBeInTheDocument();
+      expect(
+        queryByText(
+          'Node has no funds available to pay invoices. Fund the node or open a channel with outbound liquidity and try again.',
+        ),
+      ).not.toBeInTheDocument();
     });
 
     it('should display the asset dropdown', async () => {

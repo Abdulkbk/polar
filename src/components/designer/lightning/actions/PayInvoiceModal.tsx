@@ -60,19 +60,20 @@ const PayInvoiceModal: React.FC<Props> = ({ network }) => {
   const getAssetsAsync = useAsync(async () => {
     if (!visible) return;
 
-    if (selectedNode) {
-      await getInfo(selectedNode).catch(() => undefined);
-      // Fetch every node's channels so the selected node's full
-      // outbound liquidity, including peer-opened channels, can be totaled.
-      await Promise.all(
-        network.nodes.lightning.map(node => getChannels(node).catch(() => undefined)),
-      );
-    }
+    // Fetch every node's info and channels. A peer-opened channel only appears in
+    // the peer's channel list, so totaling outbound liquidity means matching those
+    // channels back to the selected node by pubkey. That needs the info of any node
+    // the user may select, not just the one selected when the modal opened.
+    await Promise.all(
+      network.nodes.lightning.map(async node => {
+        await getInfo(node).catch(() => undefined);
+        await getChannels(node).catch(() => undefined);
+      }),
+    );
 
     // Fetch litd-specific asset data
     const litNodes = network.nodes.lightning.filter(n => n.implementation === 'litd');
     for (const node of litNodes) {
-      if (node.name !== selectedNode?.name) await getInfo(node).catch(() => undefined);
       await getAssetRoots(mapToTapd(node));
     }
   }, [network.nodes, visible]);
@@ -162,7 +163,14 @@ const PayInvoiceModal: React.FC<Props> = ({ network }) => {
           onFinish={payAsync.execute}
           disabled={payAsync.loading}
         >
-          {hasNoPaymentFunds && <Alert type="warning" message={l('noFundsError')} />}
+          {hasNoPaymentFunds && (
+            <Alert
+              type="warning"
+              // a node holding assets can still pay asset invoices, so point to the
+              // asset dropdown instead of telling the user to fund the node
+              message={assets.length > 0 ? l('noSatsFundsError') : l('noFundsError')}
+            />
+          )}
           <LightningNodeSelect
             network={network}
             name="node"
