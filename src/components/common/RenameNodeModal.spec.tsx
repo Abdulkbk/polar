@@ -36,6 +36,7 @@ describe('RenameNodeModal', () => {
       eclairNodes: 1,
       litdNodes: 1,
       bitcoindNodes: 3,
+      btcdNodes: 0,
       tapdNodes: 1,
       status,
       repoState: defaultRepoState,
@@ -91,6 +92,13 @@ describe('RenameNodeModal', () => {
 
   it('should render a alert for started nodes', async () => {
     const { getByText } = await renderComponent(Status.Started);
+    expect(
+      getByText('The network will be restarted to perform this operation'),
+    ).toBeInTheDocument();
+  });
+
+  it('should render a alert for locked nodes', async () => {
+    const { getByText } = await renderComponent(Status.Locked);
     expect(
       getByText('The network will be restarted to perform this operation'),
     ).toBeInTheDocument();

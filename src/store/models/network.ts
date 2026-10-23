@@ -5,6 +5,7 @@ import { Action, action, Computed, computed, Thunk, thunk } from 'easy-peasy';
 import {
   AnyNode,
   BitcoinNode,
+  BtcdNode,
   CLightningNode,
   CommonNode,
   LightningNode,
@@ -16,13 +17,19 @@ import {
   TapNode,
 } from 'shared/types';
 import { AutoMineMode, CustomImage, Network, Simulation, StoreInjections } from 'types';
-import { AbortWaitError, delay } from 'utils/async';
+import { AbortWaitError, delay, waitFor } from 'utils/async';
 import { initChartFromNetwork } from 'utils/chart';
 import { nodePath } from 'utils/config';
-import { APP_VERSION, DOCKER_REPO } from 'utils/constants';
-import { rm } from 'utils/files';
+import {
+  APP_VERSION,
+  DOCKER_REPO,
+  FORCE_CLOSE_WAIT_TIMEOUT,
+  SEED_RESTORE_RECOVERY_WINDOW,
+} from 'utils/constants';
+import { readBuffer, rm } from 'utils/files';
 import {
   createBitcoindNetworkNode,
+  createBtcdNetworkNode,
   createCLightningNetworkNode,
   createEclairNetworkNode,
   createLitdNetworkNode,
@@ -55,6 +62,7 @@ interface AddNetworkArgs {
   clightningNodes: number;
   eclairNodes: number;
   bitcoindNodes: number;
+  btcdNodes: number;
   tapdNodes: number;
   litdNodes: number;
   customNodes: Record<string, number>;
@@ -182,6 +190,18 @@ export interface NetworkModel {
   unlockNode: Thunk<
     NetworkModel,
     { node: LndNode; password: string },
+    StoreInjections,
+    RootModel,
+    Promise<void>
+  >;
+  restoreNode: Thunk<
+    NetworkModel,
+    {
+      node: LndNode;
+      password: string;
+      mnemonic: string[];
+      backupFilePath?: string;
+    },
     StoreInjections,
     RootModel,
     Promise<void>
@@ -345,6 +365,7 @@ const networkModel: NetworkModel = {
         clightningNodes: payload.clightningNodes,
         eclairNodes: payload.eclairNodes,
         bitcoindNodes: payload.bitcoindNodes,
+        btcdNodes: payload.btcdNodes,
         tapdNodes: payload.tapdNodes,
         litdNodes: payload.litdNodes,
         repoState: dockerRepoState,
@@ -368,9 +389,9 @@ const networkModel: NetworkModel = {
           'c-lightning': payload.clightningNodes,
           eclair: payload.eclairNodes,
           bitcoind: payload.bitcoindNodes,
+          btcd: payload.btcdNodes,
           tapd: payload.tapdNodes,
           litd: payload.litdNodes,
-          btcd: 0,
         },
       });
 
@@ -452,6 +473,16 @@ const networkModel: NetworkModel = {
             docker,
             undefined,
             settings.basePorts.bitcoind,
+          );
+          network.nodes.bitcoin.push(node);
+          break;
+        case 'btcd':
+          node = createBtcdNetworkNode(
+            network,
+            version,
+            docker,
+            undefined,
+            settings.basePorts.btcd,
           );
           network.nodes.bitcoin.push(node);
           break;
@@ -642,7 +673,17 @@ const networkModel: NetworkModel = {
       if (network.status === Status.Started) {
         // wait for the LN nodes to come back online then update the chart
         await Promise.all(
-          lightning.map(n => lightningFactory.getService(n).waitUntilOnline(n)),
+          lightning.map(n =>
+            lightningFactory
+              .getService(n)
+              .waitUntilOnline(n)
+              .catch(error => {
+                // a locked node will never come online on its own, but that
+                // shouldn't stop the removed node from leaving the chart
+                if (!(error instanceof AbortWaitError)) throw error;
+                info(`Skipped waiting for '${n.name}'`, error.message);
+              }),
+          ),
         );
       }
       // remove the node from the chart's redux state
@@ -975,21 +1016,44 @@ const networkModel: NetworkModel = {
           lnNodesOnline.push(promise);
         } else if (node.type === 'bitcoin') {
           const btc = node as BitcoinNode;
-          // wait for bitcoind nodes to come online before updating their status
+          // get the freshest node from the network, fallback to the node passed in case it's not found.
+          const netBtc = network.nodes.bitcoin.find(b => b.name === btc.name) || btc;
+          // capture whether btcd already has a mining address before initialization.
+          const alreadyHasMiningAddr =
+            btc.implementation !== 'btcd' || !!(btc as BtcdNode).miningAddr;
+          // wait for bitcoin nodes to come online before updating their status
           // use .then() to continue execution while the promises are waiting to complete
           const promise = injections.bitcoinFactory
-            .getService(btc)
-            .waitUntilOnline(btc)
+            .getService(netBtc)
+            .waitUntilOnline(netBtc)
             .then(async () => {
-              actions.setStatus({ id, status: Status.Started, only: btc.name });
               // connect each bitcoin node to it's peers so tx & block propagation is fast
-              await injections.bitcoinFactory.getService(btc).connectPeers(btc);
+              await injections.bitcoinFactory.getService(netBtc).connectPeers(netBtc);
               // create a default wallet since it's not automatic on v0.21.0 and up
-              await injections.bitcoinFactory.getService(btc).createDefaultWallet(btc);
-              await getStoreActions().bitcoin.getInfo(btc);
+              // for btcd this also sets miningAddr on the node object if not yet set
+              await injections.bitcoinFactory
+                .getService(netBtc)
+                .createDefaultWallet(netBtc);
+              // btcd requires --miningaddr at startup to mine blocks. on the very first
+              // start, miningAddr is set above so we must restart btcd with the updated
+              // compose file. btcwallet will reconnect automatically.
+              if (!alreadyHasMiningAddr && (netBtc as BtcdNode).miningAddr) {
+                // persist the mining address so that it is reused on the next startup
+                // instead of a new one being generated
+                await actions.save();
+                await injections.dockerService.saveComposeFile(network);
+                await injections.dockerService.startNode(network, netBtc);
+                await injections.bitcoinFactory
+                  .getService(netBtc)
+                  .waitUntilOnline(netBtc);
+                // re-connect btcd node to its peers so tx & block propagation is fast.
+                await injections.bitcoinFactory.getService(netBtc).connectPeers(netBtc);
+              }
+              actions.setStatus({ id, status: Status.Started, only: netBtc.name });
+              await getStoreActions().bitcoin.getInfo(netBtc);
             })
             .catch(error =>
-              actions.setStatus({ id, status: Status.Error, only: btc.name, error }),
+              actions.setStatus({ id, status: Status.Error, only: netBtc.name, error }),
             );
           btcNodesOnline.push(promise);
         } else if (node.type === 'tap') {
@@ -1268,6 +1332,83 @@ const networkModel: NetworkModel = {
       resumingNodes.delete(key);
     }
   }),
+  restoreNode: thunk(
+    async (
+      actions,
+      { node, password, mnemonic, backupFilePath },
+      { injections, getStoreState, getStoreActions },
+    ) => {
+      const key = pollerKey(node);
+      resumingNodes.add(key);
+      try {
+        const channelBackup = backupFilePath
+          ? await readBuffer(backupFilePath)
+          : undefined;
+        await injections.lndService.initWallet(node, password, mnemonic, {
+          channelBackup,
+          recoveryWindow: SEED_RESTORE_RECOVERY_WINDOW,
+        });
+        await actions.monitorStartup([node]);
+        await actions.save();
+
+        const network = getStoreState().network.networkById(node.networkId);
+        // monitorStartup doesn't throw, so surface a node that failed to come online
+        const restored = network.nodes.lightning.find(n => n.name === node.name);
+        if (restored?.status !== Status.Started) {
+          throw new Error(l('nodeNotStarted', { nodeName: node.name }));
+        }
+        if (!channelBackup) return;
+
+        const backend = network.nodes.bitcoin.find(n => n.name === node.backendName);
+        if (!backend || backend.status !== Status.Started) return;
+
+        // peers force-close after data-loss-protection, so confirm in the background
+        const confirmForceCloses = async () => {
+          const btcApi = injections.bitcoinFactory.getService(backend);
+          // closing txids are unknown until confirmed, so watch the funding outputs
+          const points = await injections.lndService.getRecoveredChannelPoints(node);
+          if (!points.length) {
+            info(
+              `No recovered channels found for '${node.name}', skipping force-close confirmation`,
+            );
+            return;
+          }
+          const countSpent = async () => {
+            const spent = await Promise.all(
+              points.map(cp => {
+                const [txid, index] = cp.split(':');
+                return btcApi.isOutputSpent(backend, txid, Number(index));
+              }),
+            );
+            return spent.filter(Boolean).length;
+          };
+          try {
+            // wait for every close so a single block confirms them all
+            await waitFor(
+              async () => {
+                if ((await countSpent()) < points.length) {
+                  throw new Error('waiting for force-close transactions');
+                }
+              },
+              1000,
+              FORCE_CLOSE_WAIT_TIMEOUT,
+            );
+          } catch {
+            info(`Not all channels were force-closed for '${node.name}'`);
+          }
+          // mine even if some peers never closed, so the ones that did confirm
+          if ((await countSpent()) > 0) {
+            await getStoreActions().bitcoin.mine({ blocks: 1, node: backend });
+          }
+        };
+        confirmForceCloses().catch(e =>
+          info(`Failed to confirm force-closes for '${node.name}'`, e),
+        );
+      } finally {
+        resumingNodes.delete(key);
+      }
+    },
+  ),
   setManualMineCount: action((state, { id, count }) => {
     const network = state.networks.find(n => n.id === id);
     if (!network) throw new Error(l('networkByIdErr', { networkId: id }));

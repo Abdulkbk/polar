@@ -4,6 +4,7 @@ import { waitFor } from '@testing-library/react';
 import detectPort from 'detect-port';
 import { createStore } from 'easy-peasy';
 import {
+  BtcdNode,
   CLightningNode,
   LndNode,
   NodeImplementation,
@@ -13,7 +14,11 @@ import {
 import { AutoMineMode, CustomImage, Network } from 'types';
 import * as asyncUtil from 'utils/async';
 import { initChartFromNetwork } from 'utils/chart';
-import { defaultRepoState } from 'utils/constants';
+import {
+  defaultRepoState,
+  FORCE_CLOSE_WAIT_TIMEOUT,
+  SEED_RESTORE_RECOVERY_WINDOW,
+} from 'utils/constants';
 import * as files from 'utils/files';
 import {
   bitcoinServiceMock,
@@ -37,6 +42,7 @@ import tapModel from './tap';
 jest.mock('utils/files', () => ({
   waitForFile: jest.fn(),
   rm: jest.fn(),
+  readBuffer: jest.fn(),
 }));
 jest.mock('utils/async');
 jest.mock('utils/network', () => ({
@@ -77,6 +83,7 @@ describe('Network model', () => {
     clightningNodes: 1,
     eclairNodes: 1,
     bitcoindNodes: 1,
+    btcdNodes: 0,
     tapdNodes: 0,
     litdNodes: 1,
     customNodes: {},
@@ -160,6 +167,39 @@ describe('Network model', () => {
       bitcoin.forEach(node => {
         expect(node.type).toBe('bitcoin');
       });
+    });
+
+    it('should add a network with btcd nodes', async () => {
+      await store.getActions().network.addNetwork({
+        ...addNetworkArgs,
+        bitcoindNodes: 0,
+        btcdNodes: 2,
+        // CLN and Eclair don't support btcd backend, so set to 0
+        clightningNodes: 0,
+        eclairNodes: 0,
+      });
+      const { networks } = store.getState().network;
+      const { bitcoin } = networks[0].nodes;
+      expect(bitcoin.length).toBe(2);
+      bitcoin.forEach(node => {
+        expect(node.type).toBe('bitcoin');
+        expect(node.implementation).toBe('btcd');
+      });
+    });
+
+    it('should add a network with mixed bitcoind and btcd nodes', async () => {
+      await store
+        .getActions()
+        .network.addNetwork({ ...addNetworkArgs, bitcoindNodes: 1, btcdNodes: 1 });
+      const { networks } = store.getState().network;
+      const { bitcoin } = networks[0].nodes;
+      expect(bitcoin.length).toBe(2);
+      // bitcoind is added first
+      expect(bitcoin[0].implementation).toBe('bitcoind');
+      expect(bitcoin[1].implementation).toBe('btcd');
+      // They should be peered
+      expect(bitcoin[0].peers).toContain('backend2');
+      expect(bitcoin[1].peers).toContain('backend1');
     });
 
     it('should set all nodes to Stopped by default', async () => {
@@ -350,6 +390,43 @@ describe('Network model', () => {
       expect(bitcoin[1].docker.command).toBe(customBitcoind.command);
     });
 
+    it('should add a btcd node to an existing network', async () => {
+      const btcdLatest = defaultRepoState.images.btcd.latest;
+      const payload = { id: firstNetwork().id, type: 'btcd', version: btcdLatest };
+      store.getActions().network.addNode(payload);
+      const { bitcoin } = firstNetwork().nodes;
+      expect(bitcoin).toHaveLength(2);
+      expect(bitcoin[1].implementation).toBe('btcd');
+      expect(bitcoin[1].version).toBe(btcdLatest);
+    });
+
+    it('should add a btcd custom node', async () => {
+      const customBtcd = {
+        id: 'btcd-custom',
+        name: 'Custom BTCD',
+        implementation: 'btcd',
+        dockerImage: 'my-btcd:latest',
+        command: 'btcd-custom-cmd',
+      };
+      const settings = {
+        nodeImages: {
+          managed: [],
+          custom: [customBtcd] as CustomImage[],
+        },
+      };
+      store.getActions().app.setSettings(settings);
+      const payload = {
+        id: firstNetwork().id,
+        type: 'btcd',
+        version: defaultRepoState.images.btcd.latest,
+        customId: 'btcd-custom',
+      };
+      store.getActions().network.addNode(payload);
+      const { bitcoin } = firstNetwork().nodes;
+      expect(bitcoin[1].docker.image).toBe(customBtcd.dockerImage);
+      expect(bitcoin[1].docker.command).toBe(customBtcd.command);
+    });
+
     it('should ignore an invalid custom node', async () => {
       const invalidId = '999';
       const settings = {
@@ -436,6 +513,29 @@ describe('Network model', () => {
       expect(firstNetwork().nodes.bitcoin).toHaveLength(1);
     });
 
+    it('should remove a bitcoin node from the chart when a LN node is locked', async () => {
+      const { removeBitcoinNode, setStatus } = store.getActions().network;
+      const { id } = firstNetwork();
+      setStatus({ id, status: Status.Started });
+      lightningServiceMock.waitUntilOnline.mockRejectedValue(
+        new asyncUtil.AbortWaitError('wallet-locked'),
+      );
+      const node = firstNetwork().nodes.bitcoin[0];
+      await expect(removeBitcoinNode({ node })).resolves.not.toThrow();
+      expect(firstNetwork().nodes.bitcoin).toHaveLength(1);
+      const chart = store.getState().designer.allCharts[id];
+      expect(chart.nodes[node.name]).toBeUndefined();
+    });
+
+    it('should throw if a LN node fails to restart for any other reason', async () => {
+      const { removeBitcoinNode, setStatus } = store.getActions().network;
+      const { id } = firstNetwork();
+      setStatus({ id, status: Status.Started });
+      lightningServiceMock.waitUntilOnline.mockRejectedValue(new Error('test-error'));
+      const node = firstNetwork().nodes.bitcoin[0];
+      await expect(removeBitcoinNode({ node })).rejects.toThrow('test-error');
+    });
+
     it('should throw an error if the bitcoin node network id is invalid', async () => {
       const node = firstNetwork().nodes.bitcoin[0];
       node.networkId = 999;
@@ -465,6 +565,21 @@ describe('Network model', () => {
       const node = firstNetwork().nodes.bitcoin[2];
       await expect(removeBitcoinNode({ node })).rejects.toThrow(
         'There are no other compatible backends for frank to connect to. You must remove the frank node first',
+      );
+    });
+
+    it('should throw an error if removing the last bitcoind leaves a CLN node with only a btcd backend', async () => {
+      const { removeBitcoinNode, addNode } = store.getActions().network;
+      const { id } = firstNetwork();
+      // leave a single bitcoind node in the network for the LN nodes to connect to
+      await removeBitcoinNode({ node: firstNetwork().nodes.bitcoin[1] });
+      // add a btcd node, which the c-lightning node cannot use as a backend
+      await addNode({ id, type: 'btcd', version: defaultRepoState.images.btcd.latest });
+      // removing the only bitcoind would leave 'bob', the c-lightning node, without a
+      // compatible backend to fall back to
+      const node = firstNetwork().nodes.bitcoin[0];
+      await expect(removeBitcoinNode({ node })).rejects.toThrow(
+        'There are no other compatible backends for bob to connect to. You must remove the bob node first',
       );
     });
 
@@ -713,6 +828,16 @@ describe('Network model', () => {
         'Failed to connect all LN peers',
         err,
       );
+    });
+
+    it('should log an error if adding LN listeners fails', async () => {
+      const err = new Error('test-error');
+      lightningServiceMock.addListenerToNode.mockRejectedValue(err);
+      const { start } = store.getActions().network;
+      await start(firstNetwork().id);
+      await waitFor(() => {
+        expect(logMock.info).toHaveBeenCalledWith('Failed to connect all LN peers', err);
+      });
     });
 
     it('should throw an error if a custom node image is missing', async () => {
@@ -1138,12 +1263,62 @@ describe('Network model', () => {
       });
     });
 
+    it('should monitor network with btcd nodes', async () => {
+      const { monitorStartup } = store.getActions().network;
+      await store.getActions().network.addNetwork({
+        ...addNetworkArgs,
+        bitcoindNodes: 0,
+        btcdNodes: 2,
+        // CLN and Eclair don't support btcd backend, so set to 0
+        clightningNodes: 0,
+        eclairNodes: 0,
+      });
+      const { networks } = store.getState().network;
+      const { bitcoin } = networks[networks.length - 1].nodes;
+
+      (injections.dockerService.saveComposeFile as jest.Mock).mockClear();
+      (injections.dockerService.startNode as jest.Mock).mockClear();
+      (injections.dockerService.saveNetworks as jest.Mock).mockClear();
+
+      bitcoinServiceMock.createDefaultWallet.mockImplementation(async node => {
+        if (node.implementation === 'btcd') {
+          (node as BtcdNode).miningAddr = 'btc12345';
+        }
+      });
+
+      await monitorStartup(bitcoin);
+      expect(injections.dockerService.saveComposeFile).toHaveBeenCalledTimes(2);
+      expect(injections.dockerService.startNode).toHaveBeenCalledTimes(2);
+      // the mining address must be persisted so it isn't regenerated on the next startup
+      expect(injections.dockerService.saveNetworks).toHaveBeenCalled();
+      const { bitcoin: savedNodes } = networks[networks.length - 1].nodes;
+      expect(savedNodes.every(n => (n as BtcdNode).miningAddr === 'btc12345')).toBe(true);
+
+      // restore mock
+      bitcoinServiceMock.createDefaultWallet.mockResolvedValue();
+    });
+
     it('should do nothing for unknown node type', async () => {
       const { monitorStartup } = store.getActions().network;
       const { bitcoin } = firstNetwork().nodes;
       bitcoin[0].type = 'asdf' as any;
       await monitorStartup(bitcoin);
       expect(bitcoinServiceMock.waitUntilOnline).not.toHaveBeenCalled();
+    });
+
+    it('should monitor network whose name is unknown', async () => {
+      const { monitorStartup } = store.getActions().network;
+      const { bitcoin } = firstNetwork().nodes;
+      const externalNode = {
+        ...bitcoin[0],
+        name: 'external-node',
+      };
+
+      await monitorStartup([externalNode]);
+
+      await waitFor(() => {
+        expect(bitcoinServiceMock.waitUntilOnline).toHaveBeenCalledWith(externalNode);
+      });
     });
 
     it('should set lightning node status to Locked when waitUntilOnline aborts', async () => {
@@ -1455,6 +1630,245 @@ describe('Network model', () => {
       await expect(initNode({ node, password: 'polarpass' })).rejects.toThrow(
         'test-error',
       );
+    });
+
+    describe('restoring from a seed', () => {
+      const mnemonic = Array.from({ length: 24 }, (_, i) => `word${i + 1}`);
+      const backupFilePath = '/tmp/alice/channel.backup';
+
+      beforeEach(() => {
+        lndServiceMock.initWallet.mockResolvedValue(Buffer.from('admin-macaroon'));
+        lightningServiceMock.waitUntilOnline.mockResolvedValue();
+      });
+
+      it('should restore the seed and channel backup in a single request', async () => {
+        const backup = Buffer.from([0x00, 0xff, 0x80]);
+        filesMock.readBuffer.mockResolvedValue(backup);
+        const { restoreNode } = store.getActions().network;
+        const node = lndNode();
+        await restoreNode({ node, password: 'polarpass', mnemonic, backupFilePath });
+        expect(filesMock.readBuffer).toHaveBeenCalledWith(backupFilePath);
+        // the user's own words must be used, never a generated seed
+        expect(lndServiceMock.genSeed).not.toHaveBeenCalled();
+        expect(lndServiceMock.initWallet).toHaveBeenCalledWith(
+          node,
+          'polarpass',
+          mnemonic,
+          {
+            channelBackup: backup,
+            recoveryWindow: SEED_RESTORE_RECOVERY_WINDOW,
+          },
+        );
+        expect(lndNode().status).toBe(Status.Started);
+      });
+
+      it('should restore the seed without a channel backup', async () => {
+        const { restoreNode } = store.getActions().network;
+        const node = lndNode();
+        await restoreNode({ node, password: 'polarpass', mnemonic });
+        expect(filesMock.readBuffer).not.toHaveBeenCalled();
+        expect(lndServiceMock.genSeed).not.toHaveBeenCalled();
+        expect(lndServiceMock.initWallet).toHaveBeenCalledWith(
+          node,
+          'polarpass',
+          mnemonic,
+          {
+            channelBackup: undefined,
+            recoveryWindow: SEED_RESTORE_RECOVERY_WINDOW,
+          },
+        );
+        expect(lndNode().status).toBe(Status.Started);
+        // there are no channels to close, so nothing should be mined
+        expect(lndServiceMock.getRecoveredChannelPoints).not.toHaveBeenCalled();
+        expect(bitcoinServiceMock.mine).not.toHaveBeenCalled();
+      });
+
+      describe('confirming the force-closes', () => {
+        const backend = () => firstNetwork().nodes.bitcoin[0];
+
+        // lets the detached force-close confirmation settle before asserting
+        const flush = () => new Promise(resolve => setTimeout(resolve, 0));
+
+        beforeEach(() => {
+          filesMock.readBuffer.mockResolvedValue(Buffer.from('backup'));
+          // run the poll condition once so its branches are exercised
+          asyncUtilMock.waitFor.mockImplementation(async condition => condition());
+          lndServiceMock.getRecoveredChannelPoints.mockResolvedValue([
+            'txid1:0',
+            'txid2:1',
+          ]);
+          // mining refreshes every started node's info afterwards
+          bitcoinServiceMock.getBlockchainInfo.mockResolvedValue({ blocks: 10 } as any);
+          bitcoinServiceMock.getWalletInfo.mockResolvedValue({ balance: 1 } as any);
+          lightningServiceMock.getInfo.mockResolvedValue({ pubkey: 'abc' } as any);
+          lightningServiceMock.getBalances.mockResolvedValue({} as any);
+          lightningServiceMock.getChannels.mockResolvedValue([]);
+          const { setStatus } = store.getActions().network;
+          setStatus({ id: firstNetwork().id, status: Status.Started });
+        });
+
+        it('should mine one block once every channel is force-closed', async () => {
+          bitcoinServiceMock.isOutputSpent.mockResolvedValue(true);
+          const { restoreNode } = store.getActions().network;
+          await restoreNode({
+            node: lndNode(),
+            password: 'polarpass',
+            mnemonic,
+            backupFilePath,
+          });
+          await flush();
+          expect(asyncUtilMock.waitFor).toHaveBeenCalledWith(
+            expect.any(Function),
+            1000,
+            FORCE_CLOSE_WAIT_TIMEOUT,
+          );
+          // each recovered channel's funding outpoint is checked by itself
+          expect(bitcoinServiceMock.isOutputSpent).toHaveBeenCalledWith(
+            backend(),
+            'txid1',
+            0,
+          );
+          expect(bitcoinServiceMock.isOutputSpent).toHaveBeenCalledWith(
+            backend(),
+            'txid2',
+            1,
+          );
+          expect(bitcoinServiceMock.mine).toHaveBeenCalledWith(1, backend());
+        });
+
+        it('should not mine while no channel has been force-closed', async () => {
+          // only a spend of a recovered funding output counts
+          bitcoinServiceMock.isOutputSpent.mockResolvedValue(false);
+          const { restoreNode } = store.getActions().network;
+          await restoreNode({
+            node: lndNode(),
+            password: 'polarpass',
+            mnemonic,
+            backupFilePath,
+          });
+          await flush();
+          expect(bitcoinServiceMock.mine).not.toHaveBeenCalled();
+          // the restore itself still succeeded
+          expect(lndNode().status).toBe(Status.Started);
+        });
+
+        it('should still mine when only some peers force-closed', async () => {
+          // the wait times out, but the closes that did happen must confirm
+          bitcoinServiceMock.isOutputSpent
+            .mockResolvedValueOnce(true)
+            .mockResolvedValueOnce(false)
+            .mockResolvedValueOnce(true)
+            .mockResolvedValueOnce(false);
+          const { restoreNode } = store.getActions().network;
+          await restoreNode({
+            node: lndNode(),
+            password: 'polarpass',
+            mnemonic,
+            backupFilePath,
+          });
+          await flush();
+          expect(bitcoinServiceMock.mine).toHaveBeenCalledWith(1, backend());
+        });
+
+        it('should not mine when the node recovered no channels', async () => {
+          lndServiceMock.getRecoveredChannelPoints.mockResolvedValue([]);
+          const { restoreNode } = store.getActions().network;
+          await restoreNode({
+            node: lndNode(),
+            password: 'polarpass',
+            mnemonic,
+            backupFilePath,
+          });
+          await flush();
+          expect(bitcoinServiceMock.isOutputSpent).not.toHaveBeenCalled();
+          expect(bitcoinServiceMock.mine).not.toHaveBeenCalled();
+          expect(logMock.info).toHaveBeenCalledWith(
+            `No recovered channels found for '${
+              lndNode().name
+            }', skipping force-close confirmation`,
+          );
+        });
+
+        it('should not keep the caller waiting on the force-close check', async () => {
+          // the detached work must not run before restoreNode resolves
+          bitcoinServiceMock.isOutputSpent.mockResolvedValue(true);
+          const { restoreNode } = store.getActions().network;
+          await restoreNode({
+            node: lndNode(),
+            password: 'polarpass',
+            mnemonic,
+            backupFilePath,
+          });
+          expect(bitcoinServiceMock.mine).not.toHaveBeenCalled();
+          await flush();
+          expect(bitcoinServiceMock.mine).toHaveBeenCalledWith(1, backend());
+        });
+
+        it('should not fail the restore if mining fails', async () => {
+          bitcoinServiceMock.isOutputSpent.mockResolvedValue(true);
+          bitcoinServiceMock.mine.mockRejectedValue(new Error('mine-error'));
+          const { restoreNode } = store.getActions().network;
+          await expect(
+            restoreNode({
+              node: lndNode(),
+              password: 'polarpass',
+              mnemonic,
+              backupFilePath,
+            }),
+          ).resolves.toBeUndefined();
+          await flush();
+          expect(lndNode().status).toBe(Status.Started);
+        });
+
+        it('should not mine when the backend node is not running', async () => {
+          const { restoreNode, setStatus } = store.getActions().network;
+          setStatus({
+            id: firstNetwork().id,
+            status: Status.Stopped,
+            only: backend().name,
+          });
+          await restoreNode({
+            node: lndNode(),
+            password: 'polarpass',
+            mnemonic,
+            backupFilePath,
+          });
+          expect(lndServiceMock.getRecoveredChannelPoints).not.toHaveBeenCalled();
+          expect(bitcoinServiceMock.mine).not.toHaveBeenCalled();
+        });
+
+        it('should not mine when the backend node cannot be found', async () => {
+          const { restoreNode } = store.getActions().network;
+          const node = { ...lndNode(), backendName: 'does-not-exist' };
+          await restoreNode({ node, password: 'polarpass', mnemonic, backupFilePath });
+          expect(lndServiceMock.getRecoveredChannelPoints).not.toHaveBeenCalled();
+          expect(bitcoinServiceMock.mine).not.toHaveBeenCalled();
+        });
+      });
+
+      it('should propagate an error when the restore RPC fails', async () => {
+        lndServiceMock.initWallet.mockRejectedValue(new Error('invalid seed'));
+        const { restoreNode } = store.getActions().network;
+        const node = lndNode();
+        await expect(
+          restoreNode({ node, password: 'polarpass', mnemonic }),
+        ).rejects.toThrow('invalid seed');
+        // startup monitoring must not begin for a wallet that was never created
+        expect(lightningServiceMock.waitUntilOnline).not.toHaveBeenCalled();
+        expect(lndNode().status).not.toBe(Status.Started);
+      });
+
+      it('should throw when the node fails to come online after restoring', async () => {
+        filesMock.readBuffer.mockResolvedValue(Buffer.from('backup'));
+        lightningServiceMock.waitUntilOnline.mockRejectedValue(new Error('timed out'));
+        const { restoreNode } = store.getActions().network;
+        const node = lndNode();
+        await expect(
+          restoreNode({ node, password: 'polarpass', mnemonic, backupFilePath }),
+        ).rejects.toThrow(`The ${node.name} node is not started`);
+        expect(lndNode().status).toBe(Status.Error);
+        expect(lndServiceMock.getRecoveredChannelPoints).not.toHaveBeenCalled();
+      });
     });
   });
 

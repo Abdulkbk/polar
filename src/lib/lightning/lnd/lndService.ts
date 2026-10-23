@@ -3,8 +3,9 @@ import * as LND from '@lightningpolar/lnd-api';
 import { PendingChannel } from 'shared/lndDefaults';
 import { LightningNode, LndNode, OpenChannelOptions } from 'shared/types';
 import * as PLN from 'lib/lightning/types';
-import { LightningService } from 'types';
+import { InitWalletOptions, LightningService } from 'types';
 import { AbortWaitError, waitFor } from 'utils/async';
+import { getDefaultCommand } from 'utils/network';
 import { lndProxyClient as proxy } from './';
 import { mapOpenChannel, mapPendingChannel } from './mappers';
 
@@ -232,11 +233,22 @@ class LndService implements LightningService {
     node: LightningNode,
     password: string,
     mnemonic: string[],
+    options?: InitWalletOptions,
   ): Promise<Buffer> {
-    const res = await proxy.initWallet(this.cast(node), {
+    const req: LND.InitWalletRequestPartial = {
       walletPassword: Buffer.from(password, 'utf-8'),
       cipherSeedMnemonic: mnemonic,
-    });
+    };
+    if (options?.channelBackup) {
+      // the SCB lets LND trigger data-loss-protection with each peer
+      req.channelBackups = {
+        multiChanBackup: { multiChanBackup: options.channelBackup },
+      };
+    }
+    if (options?.recoveryWindow !== undefined) {
+      req.recoveryWindow = options.recoveryWindow;
+    }
+    const res = await proxy.initWallet(this.cast(node), req);
     return res.adminMacaroon;
   }
 
@@ -244,6 +256,14 @@ class LndService implements LightningService {
     await proxy.unlockWallet(this.cast(node), {
       walletPassword: Buffer.from(password, 'utf-8'),
     });
+  }
+
+  /** Returns the funding outpoints of recovered channels that are waiting to close */
+  async getRecoveredChannelPoints(node: LightningNode): Promise<string[]> {
+    const { waitingCloseChannels } = await proxy.pendingChannels(this.cast(node));
+    return waitingCloseChannels
+      .map(c => c.channel?.channelPoint)
+      .filter((cp): cp is string => !!cp);
   }
 
   /**
@@ -255,12 +275,14 @@ class LndService implements LightningService {
     interval = 3 * 1000, // check every 3 seconds
     timeout = 120 * 1000, // timeout after 120 seconds
   ): Promise<void> {
-    // a node started with --noseedbackup auto-creates its wallet shortly after
-    // the State service comes up, so it can briefly report NON_EXISTING before
-    // that happens. Only treat NON_EXISTING as needing user action once it's
-    // been observed twice in a row, to avoid mistaking that window for a
-    // wallet that was never initialized.
-    let nonExistingCount = 0;
+    // a node started with --noseedbackup creates its own wallet moments after the
+    // State service comes up, so NON_EXISTING is just a phase of its startup.
+    // Without the flag, the wallet only exists once the user creates it.
+    const command =
+      node.docker.command || getDefaultCommand(node.implementation, node.version);
+    // match the flag itself (litd prefixes it with `lnd.`), not a substring that
+    // could appear inside another argument's value such as an alias
+    const autoCreatesWallet = /(^|\s)--(lnd\.)?noseedbackup(?=\s|$)/.test(command);
     return waitFor(
       async () => {
         const state = await this.getWalletState(node);
@@ -269,15 +291,13 @@ class LndService implements LightningService {
           throw new AbortWaitError('wallet-locked');
         }
         if (state === 'NON_EXISTING') {
-          nonExistingCount += 1;
-          if (nonExistingCount < 2) {
-            throw new Error('waiting for wallet state to stabilize');
-          }
-          throw new AbortWaitError('wallet-not-initialized');
+          // the node cannot create the wallet itself, so it needs user action
+          if (!autoCreatesWallet) throw new AbortWaitError('wallet-not-initialized');
+          throw new Error('waiting for the wallet to be created');
         }
-        nonExistingCount = 0;
-        if (state !== 'RPC_ACTIVE' && state !== 'SERVER_ACTIVE') {
-          throw new Error(`waiting for RPC_ACTIVE, current state: ${state}`);
+        // RPC_ACTIVE precedes the p2p server starting, so wait for SERVER_ACTIVE
+        if (state !== 'SERVER_ACTIVE') {
+          throw new Error(`waiting for SERVER_ACTIVE, current state: ${state}`);
         }
         await this.getInfo(node);
       },
